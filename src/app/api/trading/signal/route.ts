@@ -8,10 +8,9 @@ import { TelegramAlerter } from '@/trading/alerts/telegram';
 import { TradingDB } from '@/trading/db/client';
 import type { Candle } from '@/trading/types';
 
-function getEnv(key: string): string {
-  const v = process.env[key];
-  if (!v) throw new Error(`Missing env: ${key}`);
-  return v;
+function getOptionalEnv(key: string): string | null {
+  const value = process.env[key]?.trim();
+  return value ? value : null;
 }
 
 export async function POST(req: NextRequest) {
@@ -21,14 +20,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'symbol and candles[20+] required' }, { status: 400 });
     }
 
-    const supabase = createClient(getEnv('SUPABASE_URL'), getEnv('SUPABASE_SERVICE_KEY'));
-    const db = new TradingDB(supabase as unknown as import('@/trading/db/client').SupabaseClient);
+    const supabaseUrl = getOptionalEnv('SUPABASE_URL');
+    const supabaseServiceKey = getOptionalEnv('SUPABASE_SERVICE_KEY');
+    const telegramBotToken = getOptionalEnv('TELEGRAM_BOT_TOKEN');
+    const telegramChatId = getOptionalEnv('TELEGRAM_CHAT_ID');
 
-    const alerter = new TelegramAlerter({
-      botToken: getEnv('TELEGRAM_BOT_TOKEN'),
-      chatId: getEnv('TELEGRAM_CHAT_ID'),
-      dryRun: process.env.TELEGRAM_DRY_RUN === 'true',
-    });
+    const db =
+      supabaseUrl && supabaseServiceKey
+        ? new TradingDB(
+            createClient(
+              supabaseUrl,
+              supabaseServiceKey
+            ) as unknown as import('@/trading/db/client').SupabaseClient
+          )
+        : null;
+
+    const alerter =
+      telegramBotToken && telegramChatId
+        ? new TelegramAlerter({
+            botToken: telegramBotToken,
+            chatId: telegramChatId,
+            dryRun: process.env.TELEGRAM_DRY_RUN === 'true',
+          })
+        : null;
 
     const risk = new RiskManager({
       maxDrawdownPct: 0.10, dailyLossLimitPct: 0.02,
@@ -49,22 +63,35 @@ export async function POST(req: NextRequest) {
 
     const results = await Promise.all(
       signals.map(async (signal) => {
-        await db.saveSignal(signal);
-        alerter.signal(signal);
+        if (db) {
+          await db.saveSignal(signal);
+        }
+        alerter?.signal(signal);
         const snap = portfolio.snapshot();
         const result = await engine.execute(signal, snap);
-        await db.saveOrder(result.order);
-        alerter.order(result.order);
+        if (db) {
+          await db.saveOrder(result.order);
+        }
+        alerter?.order(result.order);
         if (result.fill) {
           portfolio.applyFill(result.order, result.fill);
-          await db.saveSnapshot(portfolio.snapshot());
+          if (db) {
+            await db.saveSnapshot(portfolio.snapshot());
+          }
         }
-        if (result.blocked) alerter.risk('BLOCKED', result.blocked);
+        if (result.blocked) {
+          alerter?.risk('BLOCKED', result.blocked);
+        }
         return { signalId: signal.id, decision: result.order.status, blocked: result.blocked };
       })
     );
 
-    return NextResponse.json({ symbol, signals: results });
+    return NextResponse.json({
+      symbol,
+      signals: results,
+      persistence: db ? 'enabled' : 'disabled',
+      alerts: alerter ? 'enabled' : 'disabled',
+    });
   } catch (err) {
     console.error('[/api/trading/signal]', err);
     return NextResponse.json({ error: 'Internal error' }, { status: 500 });

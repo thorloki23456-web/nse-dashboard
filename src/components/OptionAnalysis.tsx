@@ -1,20 +1,6 @@
 'use client';
 
-interface OptionLeg {
-  openInterest: number;
-  changeinOpenInterest: number;
-  totalTradedVolume: number;
-  lastPrice: number;
-  change: number;
-  pChange: number;
-  impliedVolatility: number;
-}
-
-interface OptionData {
-  strikePrice: number;
-  CE?: OptionLeg;
-  PE?: OptionLeg;
-}
+import type { OptionStrike } from '@/lib/types';
 
 type Analysis = 'Long Buildup' | 'Short Buildup' | 'Short Covering' | 'Long Liquidation' | 'No Activity';
 type Trend = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
@@ -54,7 +40,7 @@ const trendBadge: Record<Trend, { bg: string; text: string }> = {
 };
 
 interface OptionAnalysisProps {
-  data: OptionData[];
+  data: OptionStrike[];
 }
 
 export default function OptionAnalysis({ data }: OptionAnalysisProps) {

@@ -1,3 +1,5 @@
+import { computeConfluence, normalizeSignal } from '@/lib/confluence-engine';
+import { blackScholesGreeks } from '@/lib/greeks';
 import {
   calculateDEX,
   calculateGEX,
@@ -7,21 +9,18 @@ import {
   calculateUVR,
   calculateVegaExposure,
 } from '@/lib/signals';
-import { computeConfluence, normalizeSignal } from '@/lib/confluence-engine';
 import type {
-  ConfluenceResult,
+  AnalyticsContext,
+  AnalyticsSnapshot,
   OptionChain,
+  OptionLeg,
   OptionStrike,
+  SignalMetrics,
   SignalScore,
+  TechnicalAnalysisSnapshot,
 } from '@/lib/types';
 
-export interface LiveOptionLegInput {
-  openInterest?: number;
-  changeinOpenInterest?: number;
-  totalTradedVolume?: number;
-  lastPrice?: number;
-  impliedVolatility?: number;
-}
+export type LiveOptionLegInput = Partial<OptionLeg>;
 
 export interface LiveOptionStrikeInput {
   strikePrice: number;
@@ -30,77 +29,40 @@ export interface LiveOptionStrikeInput {
   PE?: LiveOptionLegInput;
 }
 
-export interface TechnicalSnapshot {
-  signal: 'BUY' | 'SELL' | 'NEUTRAL';
-  currentTrend: 'up' | 'down' | 'none';
-  currentRSI: number;
-  currentATR: number;
-  superTrendValue: number;
-}
-
-export interface AnalyticsContext {
-  strategy?:
-    | 'momentum'
-    | 'meanrev'
-    | 'gamma'
-    | 'vol_expand'
-    | 'pin_trade'
-    | 'uoa_follow';
-  avgVolume?: number;
-  volumeHistory?: number[];
-  ivRank?: number;
-  ivRange?: {
-    low: number;
-    high: number;
-  };
-  ltpVsVwapPct?: number;
-  vpin?: number;
-  riskFreeRate?: number;
-  daysToExpiry?: number;
-}
-
 export interface BuildAnalyticsInput {
   symbol: string;
   expiryDate: string;
   timestamp?: string;
   underlyingValue: number;
   strikes: LiveOptionStrikeInput[];
-  technical?: TechnicalSnapshot | null;
   context?: AnalyticsContext;
+  technical?: TechnicalAnalysisSnapshot | null;
 }
 
-export interface DerivedSignalMetrics {
-  gex: number;
-  gammaFlip: number;
-  dex: number;
-  ivSkew: number;
-  vegaExposure: number;
-  oiImbalance: number;
-  uvr: number;
-  totalVolume: number;
-  avgVolume: number;
-  ltpVsVwapPct: number;
-  ivRank: number;
-  vpin: number;
+export type DerivedSignalMetrics = SignalMetrics;
+export type { AnalyticsContext };
+
+type GammaFlipPayload =
+  | number
+  | {
+      flipPct?: number;
+      flipStrike?: number | null;
+      regime?: string;
+    };
+
+const DEFAULT_RISK_FREE_RATE = 0.1;
+const DEFAULT_LOT_SIZE = 50;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
-export interface AnalyticsSnapshot {
-  chain: OptionChain;
-  metrics: DerivedSignalMetrics;
-  signalScores: SignalScore[];
-  confluence: ConfluenceResult;
+function round(value: number, decimals = 4) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 }
 
-const DEFAULT_CONTEXT: Required<
-  Pick<AnalyticsContext, 'strategy' | 'vpin' | 'riskFreeRate' | 'daysToExpiry'>
-> = {
-  strategy: 'momentum',
-  vpin: 25,
-  riskFreeRate: 0.1,
-  daysToExpiry: 7,
-};
-
-function toFiniteNumber(value: unknown, fallback = 0): number {
+function toFiniteNumber(value: unknown, fallback = 0) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
   }
@@ -115,355 +77,349 @@ function toFiniteNumber(value: unknown, fallback = 0): number {
   return fallback;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  if (value < min) {
-    return min;
-  }
-  if (value > max) {
-    return max;
-  }
-  return value;
-}
-
-function asNumericSignal(value: unknown): number {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (value && typeof value === 'object') {
-    const candidate = (value as { value?: unknown }).value;
-    return toFiniteNumber(candidate, 0);
-  }
-
-  return 0;
-}
-
-function normalizeLeg(leg?: LiveOptionLegInput) {
+function normalizeLeg(leg?: LiveOptionLegInput): OptionLeg | undefined {
   if (!leg) {
     return undefined;
   }
 
   return {
-    openInterest: Math.max(0, toFiniteNumber(leg.openInterest, 0)),
-    changeinOpenInterest: toFiniteNumber(leg.changeinOpenInterest, 0),
-    totalTradedVolume: Math.max(0, toFiniteNumber(leg.totalTradedVolume, 0)),
-    lastPrice: Math.max(0, toFiniteNumber(leg.lastPrice, 0)),
-    impliedVolatility: Math.max(0, toFiniteNumber(leg.impliedVolatility, 0)),
+    openInterest: Math.max(0, toFiniteNumber(leg.openInterest)),
+    changeinOpenInterest: toFiniteNumber(leg.changeinOpenInterest),
+    totalTradedVolume: Math.max(0, toFiniteNumber(leg.totalTradedVolume)),
+    lastPrice: Math.max(0, toFiniteNumber(leg.lastPrice)),
+    impliedVolatility: Math.max(0, toFiniteNumber(leg.impliedVolatility)),
+    change: toFiniteNumber(leg.change, 0),
+    pChange: toFiniteNumber(leg.pChange, 0),
+    delta: Number.isFinite(leg.delta) ? leg.delta : undefined,
+    gamma: Number.isFinite(leg.gamma) ? leg.gamma : undefined,
+    theta: Number.isFinite(leg.theta) ? leg.theta : undefined,
+    vega: Number.isFinite(leg.vega) ? leg.vega : undefined,
+    rho: Number.isFinite(leg.rho) ? leg.rho : undefined,
   };
 }
 
 function normalizeStrike(strike: LiveOptionStrikeInput): OptionStrike {
   return {
-    strikePrice: toFiniteNumber(strike.strikePrice, 0),
-    expiryDate: strike.expiryDate ?? '',
+    strikePrice: toFiniteNumber(strike.strikePrice),
+    expiryDate: strike.expiryDate,
     CE: normalizeLeg(strike.CE),
     PE: normalizeLeg(strike.PE),
-  } as OptionStrike;
+  };
 }
 
-function createChainSnapshot(input: BuildAnalyticsInput): OptionChain {
-  const normalizedStrikes = (input.strikes ?? [])
-    .map(normalizeStrike)
-    .sort((a, b) => toFiniteNumber(a.strikePrice, 0) - toFiniteNumber(b.strikePrice, 0));
-
+export function createOptionChain(input: BuildAnalyticsInput): OptionChain {
   return {
     symbol: input.symbol,
     expiryDate: input.expiryDate,
-    timestamp: input.timestamp ?? '',
-    underlyingValue: toFiniteNumber(input.underlyingValue, 0),
-    data: normalizedStrikes,
-  } as OptionChain;
+    timestamp: input.timestamp,
+    underlyingValue: toFiniteNumber(input.underlyingValue),
+    lotSize: input.context?.lotSize ?? DEFAULT_LOT_SIZE,
+    data: [...input.strikes].map(normalizeStrike).sort((a, b) => a.strikePrice - b.strikePrice),
+  };
 }
 
-function computeTotalVolume(strikes: OptionStrike[]): number {
-  return strikes.reduce((acc, strike) => {
-    const ceVolume = toFiniteNumber(strike.CE?.totalTradedVolume, 0);
-    const peVolume = toFiniteNumber(strike.PE?.totalTradedVolume, 0);
-    return acc + ceVolume + peVolume;
-  }, 0);
+function totalLegValue(strikes: OptionStrike[], side: 'CE' | 'PE', field: keyof OptionLeg) {
+  return strikes.reduce((sum, strike) => sum + toFiniteNumber(strike[side]?.[field]), 0);
 }
 
-function computeAverageVolume(totalVolume: number, context?: AnalyticsContext): number {
+function computeTotalVolume(strikes: OptionStrike[]) {
+  return strikes.reduce(
+    (sum, strike) =>
+      sum +
+      toFiniteNumber(strike.CE?.totalTradedVolume) +
+      toFiniteNumber(strike.PE?.totalTradedVolume),
+    0
+  );
+}
+
+function computeAverageVolume(totalVolume: number, context?: AnalyticsContext) {
   if (typeof context?.avgVolume === 'number' && context.avgVolume > 0) {
     return context.avgVolume;
   }
 
-  const history = (context?.volumeHistory ?? []).filter((v) => Number.isFinite(v) && v > 0);
-  if (history.length > 0) {
-    const sum = history.reduce((acc, value) => acc + value, 0);
-    return sum / history.length;
+  const history = (context?.volumeHistory ?? []).filter((value) => Number.isFinite(value) && value > 0);
+  if (history.length === 0) {
+    return totalVolume || 1;
   }
 
-  return totalVolume > 0 ? totalVolume : 1;
+  return history.reduce((sum, value) => sum + value, 0) / history.length;
 }
 
-function findNearestStrike(strikes: OptionStrike[], underlyingValue: number): OptionStrike | null {
-  if (strikes.length === 0) {
-    return null;
+function resolveGammaFlipValue(payload: GammaFlipPayload) {
+  if (typeof payload === 'number') {
+    return payload;
   }
 
-  let nearest = strikes[0];
-  let bestDistance = Math.abs(toFiniteNumber(nearest.strikePrice, 0) - underlyingValue);
+  return toFiniteNumber(payload.flipPct, 0);
+}
 
-  for (let i = 1; i < strikes.length; i += 1) {
-    const candidate = strikes[i];
-    const distance = Math.abs(toFiniteNumber(candidate.strikePrice, 0) - underlyingValue);
-    if (distance < bestDistance) {
-      nearest = candidate;
-      bestDistance = distance;
+function findNearestStrike(strikes: OptionStrike[], underlyingValue: number) {
+  return strikes.reduce<OptionStrike | null>((nearest, strike) => {
+    if (!nearest) {
+      return strike;
     }
-  }
 
-  return nearest;
+    const currentDistance = Math.abs(strike.strikePrice - underlyingValue);
+    const nearestDistance = Math.abs(nearest.strikePrice - underlyingValue);
+    return currentDistance < nearestDistance ? strike : nearest;
+  }, null);
 }
 
-function estimateLtpVsVwapPct(chain: OptionChain, context?: AnalyticsContext): number {
+function estimateLtpVsVwapPct(chain: OptionChain, context?: AnalyticsContext) {
   if (typeof context?.ltpVsVwapPct === 'number' && Number.isFinite(context.ltpVsVwapPct)) {
-    return context.ltpVsVwapPct;
+    return round(context.ltpVsVwapPct);
   }
 
-  const strikes = ((chain as unknown as { data?: OptionStrike[] }).data ?? []) as OptionStrike[];
-  const underlyingValue = toFiniteNumber((chain as unknown as { underlyingValue?: number }).underlyingValue, 0);
-  if (strikes.length === 0 || underlyingValue <= 0) {
-    return 0;
-  }
-
-  const nearest = findNearestStrike(strikes, underlyingValue);
+  const nearest = findNearestStrike(chain.data, chain.underlyingValue);
   if (!nearest) {
     return 0;
   }
 
-  const cePrice = toFiniteNumber(nearest.CE?.lastPrice, 0);
-  const pePrice = toFiniteNumber(nearest.PE?.lastPrice, 0);
-  const syntheticForward = toFiniteNumber(nearest.strikePrice, 0) + cePrice - pePrice;
-  if (syntheticForward <= 0) {
+  const syntheticVwap = nearest.strikePrice + toFiniteNumber(nearest.CE?.lastPrice) - toFiniteNumber(nearest.PE?.lastPrice);
+  if (syntheticVwap <= 0) {
     return 0;
   }
 
-  return ((underlyingValue - syntheticForward) / syntheticForward) * 100;
+  return round(((chain.underlyingValue - syntheticVwap) / syntheticVwap) * 100);
 }
 
-function estimateCurrentIv(chain: OptionChain): number {
-  const strikes = ((chain as unknown as { data?: OptionStrike[] }).data ?? []) as OptionStrike[];
-  if (strikes.length === 0) {
-    return 0;
-  }
-
-  let weightedIvSum = 0;
-  let totalOi = 0;
-
-  for (const strike of strikes) {
-    const ceIv = toFiniteNumber(strike.CE?.impliedVolatility, 0);
-    const peIv = toFiniteNumber(strike.PE?.impliedVolatility, 0);
-    const ceOi = toFiniteNumber(strike.CE?.openInterest, 0);
-    const peOi = toFiniteNumber(strike.PE?.openInterest, 0);
-
-    weightedIvSum += ceIv * ceOi + peIv * peOi;
-    totalOi += ceOi + peOi;
-  }
-
-  if (totalOi <= 0) {
-    return 0;
-  }
-
-  return weightedIvSum / totalOi;
-}
-
-function estimateIvRank(chain: OptionChain, context?: AnalyticsContext): number {
+function estimateIvRank(chain: OptionChain, context?: AnalyticsContext) {
   if (typeof context?.ivRank === 'number' && Number.isFinite(context.ivRank)) {
     return clamp(context.ivRank, 0, 100);
   }
 
-  const iv = estimateCurrentIv(chain);
-  const low = toFiniteNumber(context?.ivRange?.low, 10);
-  const high = toFiniteNumber(context?.ivRange?.high, 80);
-  const span = high - low;
+  const totalWeightedIv = chain.data.reduce((sum, strike) => {
+    return (
+      sum +
+      toFiniteNumber(strike.CE?.impliedVolatility) * toFiniteNumber(strike.CE?.openInterest) +
+      toFiniteNumber(strike.PE?.impliedVolatility) * toFiniteNumber(strike.PE?.openInterest)
+    );
+  }, 0);
+  const totalOi = totalLegValue(chain.data, 'CE', 'openInterest') + totalLegValue(chain.data, 'PE', 'openInterest');
+  const currentIv = totalOi > 0 ? totalWeightedIv / totalOi : 0;
+  const ivLow = context?.ivRange?.low ?? 10;
+  const ivHigh = context?.ivRange?.high ?? 80;
 
-  if (span <= 0) {
-    return clamp(iv, 0, 100);
+  if (ivHigh <= ivLow) {
+    return clamp(currentIv, 0, 100);
   }
 
-  return clamp(((iv - low) / span) * 100, 0, 100);
+  return round(clamp(((currentIv - ivLow) / (ivHigh - ivLow)) * 100, 0, 100), 2);
 }
 
-function safeNormalize(value: number): number {
-  try {
-    const normalized = (normalizeSignal as unknown as (raw: number) => number)(value);
-    if (Number.isFinite(normalized)) {
-      return clamp(normalized, 0, 100);
+function calculateMaxPainDistance(chain: OptionChain) {
+  if (chain.data.length === 0 || chain.underlyingValue <= 0) {
+    return 0;
+  }
+
+  let minLoss = Number.POSITIVE_INFINITY;
+  let maxPainStrike = chain.data[0].strikePrice;
+
+  for (const candidate of chain.data) {
+    const testStrike = candidate.strikePrice;
+    let totalLoss = 0;
+
+    for (const strike of chain.data) {
+      const strikePrice = strike.strikePrice;
+      if (testStrike > strikePrice) {
+        totalLoss += toFiniteNumber(strike.CE?.openInterest) * (testStrike - strikePrice);
+      }
+      if (testStrike < strikePrice) {
+        totalLoss += toFiniteNumber(strike.PE?.openInterest) * (strikePrice - testStrike);
+      }
     }
-  } catch {
-    // Fallback to internal normalization path.
+
+    if (totalLoss < minLoss) {
+      minLoss = totalLoss;
+      maxPainStrike = testStrike;
+    }
   }
 
-  return clamp(Math.abs(value), 0, 100);
+  return round(((maxPainStrike - chain.underlyingValue) / chain.underlyingValue) * 100);
 }
 
-function createSignalScore(
-  key: string,
-  value: number,
-  bullishBias: boolean,
-  weight: number,
-  description: string
-): SignalScore {
-  const normalized = safeNormalize(value);
-  const bullish = bullishBias ? normalized : 100 - normalized;
-  const bearish = bullishBias ? 100 - normalized : normalized;
+function calculatePCR(chain: OptionChain) {
+  const callOi = totalLegValue(chain.data, 'CE', 'openInterest');
+  const putOi = totalLegValue(chain.data, 'PE', 'openInterest');
 
-  return {
-    key,
-    value,
-    normalized,
-    bullish,
-    bearish,
-    weight,
-    description,
-  } as unknown as SignalScore;
+  if (callOi <= 0) {
+    return 1;
+  }
+
+  return round(putOi / callOi);
 }
 
-export function deriveSignalMetrics(chain: OptionChain, context?: AnalyticsContext): DerivedSignalMetrics {
-  const strikes = ((chain as unknown as { data?: OptionStrike[] }).data ?? []) as OptionStrike[];
-  const totalVolume = computeTotalVolume(strikes);
+function calculateThetaPressure(chain: OptionChain) {
+  if (chain.data.length === 0 || chain.underlyingValue <= 0) {
+    return 0;
+  }
+
+  const weightedTheta = chain.data.reduce((sum, strike) => {
+    const timeToExpiryYears = Math.max(1 / 365, 7 / 365);
+    const callIv = Math.max(0.01, toFiniteNumber(strike.CE?.impliedVolatility) / 100);
+    const putIv = Math.max(0.01, toFiniteNumber(strike.PE?.impliedVolatility) / 100);
+
+    const callTheta =
+      strike.CE?.theta ??
+      blackScholesGreeks(
+        chain.underlyingValue,
+        strike.strikePrice,
+        timeToExpiryYears,
+        DEFAULT_RISK_FREE_RATE,
+        callIv,
+        true
+      ).theta;
+    const putTheta =
+      strike.PE?.theta ??
+      blackScholesGreeks(
+        chain.underlyingValue,
+        strike.strikePrice,
+        timeToExpiryYears,
+        DEFAULT_RISK_FREE_RATE,
+        putIv,
+        false
+      ).theta;
+
+    return (
+      sum +
+      Math.abs(callTheta) * toFiniteNumber(strike.CE?.openInterest) +
+      Math.abs(putTheta) * toFiniteNumber(strike.PE?.openInterest)
+    );
+  }, 0);
+
+  const totalOi = totalLegValue(chain.data, 'CE', 'openInterest') + totalLegValue(chain.data, 'PE', 'openInterest');
+  if (totalOi <= 0) {
+    return 0;
+  }
+
+  return round(clamp((weightedTheta / totalOi) * 1000, 0, 100), 2);
+}
+
+function directionalAnchor(metrics: SignalMetrics) {
+  return (
+    metrics.gex / 100 +
+    metrics.gammaFlip / 2 +
+    metrics.dex / 100 +
+    metrics.oiImbalance / 100 +
+    metrics.netDelta -
+    (metrics.pcr - 1.05) +
+    metrics.maxPainDistance / 2 +
+    metrics.ltpVsVwapPct / 2
+  );
+}
+
+export function deriveSignalMetrics(chain: OptionChain, context?: AnalyticsContext): SignalMetrics {
+  const totalVolume = computeTotalVolume(chain.data);
   const avgVolume = computeAverageVolume(totalVolume, context);
-
-  const gex = asNumericSignal(calculateGEX(chain));
-  const gammaFlip = asNumericSignal(calculateGammaFlip(chain));
-  const dex = asNumericSignal(calculateDEX(chain));
-  const ivSkew = asNumericSignal(calculateIVSkew(chain));
-  const vegaExposure = asNumericSignal(calculateVegaExposure(chain));
-  const oiImbalance = asNumericSignal(calculateOIImbalance(chain));
-  const uvr = asNumericSignal(calculateUVR(totalVolume, avgVolume));
+  const gex = round(calculateGEX(chain), 2);
+  const gammaFlip = round(resolveGammaFlipValue(calculateGammaFlip(chain) as GammaFlipPayload), 4);
+  const dex = round(calculateDEX(chain), 2);
+  const oiImbalance = round(calculateOIImbalance(chain), 2);
 
   return {
     gex,
     gammaFlip,
     dex,
-    ivSkew,
-    vegaExposure,
+    ivSkew: round(calculateIVSkew(chain), 2),
+    vegaExposure: round(calculateVegaExposure(chain), 2),
     oiImbalance,
-    uvr,
+    uvr: round(calculateUVR(totalVolume, avgVolume), 4),
+    pcr: calculatePCR(chain),
+    maxPainDistance: calculateMaxPainDistance(chain),
+    ltpVsVwapPct: estimateLtpVsVwapPct(chain, context),
+    vpin: round(clamp(toFiniteNumber(context?.vpin, 28), 0, 100), 2),
+    thetaPressure: calculateThetaPressure(chain),
+    netDelta: round(dex / 100, 4),
+    ivRank: estimateIvRank(chain, context),
     totalVolume,
     avgVolume,
-    ltpVsVwapPct: estimateLtpVsVwapPct(chain, context),
-    ivRank: estimateIvRank(chain, context),
-    vpin: clamp(toFiniteNumber(context?.vpin, DEFAULT_CONTEXT.vpin), 0, 100),
   };
 }
 
 export function buildSignalScores(
-  metrics: DerivedSignalMetrics,
-  technical?: TechnicalSnapshot | null
+  metrics: SignalMetrics,
+  technical?: TechnicalAnalysisSnapshot | null
 ): SignalScore[] {
-  const technicalBias = technical
-    ? technical.signal === 'BUY'
-      ? 1
-      : technical.signal === 'SELL'
-        ? -1
-        : 0
-    : 0;
+  const anchor = directionalAnchor(metrics);
+  const anchorSign = anchor === 0 ? 1 : Math.sign(anchor);
+  const unusualVolumeSupport = anchorSign * clamp((metrics.uvr - 1) * 35, -100, 100);
+  const ivRankSupport = anchorSign * clamp(30 - metrics.ivRank, -70, 70);
+  const toxicitySupport = anchorSign * clamp(60 - metrics.vpin, -80, 80);
 
-  const scores: SignalScore[] = [
-    createSignalScore('gex', metrics.gex, metrics.gex >= 0, 1.1, 'Gamma exposure regime'),
-    createSignalScore('gammaFlip', metrics.gammaFlip, metrics.gammaFlip >= 0, 1.15, 'Dealer gamma flip positioning'),
-    createSignalScore('dex', metrics.dex, metrics.dex >= 0, 1.0, 'Net delta exposure'),
-    createSignalScore('ivSkew', metrics.ivSkew, metrics.ivSkew <= 0, 0.85, 'Put-call volatility skew'),
-    createSignalScore('vegaExposure', metrics.vegaExposure, metrics.vegaExposure >= 0, 0.9, 'Net vega positioning'),
-    createSignalScore('oiImbalance', metrics.oiImbalance, metrics.oiImbalance >= 0, 1.2, 'Delta-weighted open interest imbalance'),
-    createSignalScore('uvr', metrics.uvr, metrics.uvr >= 1, 1.25, 'Unusual volume ratio'),
-    createSignalScore('ivRank', metrics.ivRank - 50, metrics.ivRank < 30, 0.8, 'Relative implied-volatility rank'),
-    createSignalScore('vpin', 100 - metrics.vpin, metrics.vpin < 60, 0.95, 'Order-flow toxicity filter'),
-    createSignalScore(
-      'ltpVsVwap',
-      metrics.ltpVsVwapPct,
-      metrics.ltpVsVwapPct >= 0,
-      0.9,
-      'Underlying relative to synthetic options VWAP proxy'
-    ),
+  const scores = [
+    normalizeSignal({ name: 'gex', value: metrics.gex }),
+    normalizeSignal({ name: 'gammaFlip', value: metrics.gammaFlip }),
+    normalizeSignal({ name: 'dex', value: metrics.dex }),
+    normalizeSignal({ name: 'ivSkew', value: metrics.ivSkew }),
+    normalizeSignal({ name: 'vegaExposure', value: metrics.vegaExposure }),
+    normalizeSignal({ name: 'oiImbalance', value: metrics.oiImbalance }),
+    normalizeSignal({ name: 'pcr', value: metrics.pcr }),
+    normalizeSignal({ name: 'maxPainDistance', value: metrics.maxPainDistance }),
+    normalizeSignal({ name: 'ltpVsVwapPct', value: metrics.ltpVsVwapPct }),
+    normalizeSignal({ name: 'thetaPressure', value: metrics.thetaPressure }),
+    normalizeSignal({ name: 'netDelta', value: metrics.netDelta }),
+    normalizeSignal({
+      name: 'uvr',
+      value: unusualVolumeSupport,
+      description: 'Unusual flow aligned to the prevailing directional anchor.',
+    }),
+    normalizeSignal({
+      name: 'ivRank',
+      value: ivRankSupport,
+      description: 'IV rank translated into directional opportunity support.',
+    }),
+    normalizeSignal({
+      name: 'vpin',
+      value: toxicitySupport,
+      description: 'Toxicity-adjusted directional conviction.',
+    }),
   ];
 
-  if (technicalBias !== 0) {
+  if (technical) {
+    const technicalValue =
+      technical.signal === 'BUY' ? 70 : technical.signal === 'SELL' ? -70 : 0;
     scores.push(
-      createSignalScore(
-        'technicalBias',
-        technicalBias * 100,
-        technicalBias > 0,
-        0.75,
-        'SuperTrend and RSI directional bias'
-      )
+      normalizeSignal({
+        name: 'technicalSignal',
+        value: technicalValue,
+        description: 'Spot-derived SuperTrend and RSI confirmation.',
+      })
     );
   }
 
   return scores;
 }
 
-function safeConfluence(input: {
-  chain: OptionChain;
-  strategy: string;
-  signalScores: SignalScore[];
-  metrics: DerivedSignalMetrics;
-  technical?: TechnicalSnapshot | null;
-}): ConfluenceResult {
-  const runtimeComputeConfluence = computeConfluence as unknown as (payload: unknown) => ConfluenceResult;
-
-  try {
-    return runtimeComputeConfluence(input);
-  } catch {
-    // Defensive fallback keeps the analytics pipeline stable if engine signature changes.
-    const weighted = input.signalScores.reduce(
-      (acc, score) => {
-        const normalized = toFiniteNumber((score as unknown as { normalized?: number }).normalized, 50);
-        const weight = Math.max(0.1, toFiniteNumber((score as unknown as { weight?: number }).weight, 1));
-        acc.totalWeight += weight;
-        acc.bullish += normalized * weight;
-        acc.bearish += (100 - normalized) * weight;
-        return acc;
-      },
-      { bullish: 0, bearish: 0, totalWeight: 0 }
-    );
-
-    const bullishScore = weighted.totalWeight > 0 ? weighted.bullish / weighted.totalWeight : 50;
-    const bearishScore = weighted.totalWeight > 0 ? weighted.bearish / weighted.totalWeight : 50;
-    const spread = bullishScore - bearishScore;
-    const regime = spread > 8 ? 'LONG' : spread < -8 ? 'SHORT' : 'NEUTRAL';
-
-    return {
-      bullishScore: Math.round(clamp(bullishScore, 0, 100)),
-      bearishScore: Math.round(clamp(bearishScore, 0, 100)),
-      regime,
-      confidence: Math.round(clamp(Math.abs(spread), 0, 100)),
-      breakdown: input.signalScores,
-    } as unknown as ConfluenceResult;
-  }
-}
-
 export function buildAnalyticsSnapshot(input: BuildAnalyticsInput): AnalyticsSnapshot {
-  const chain = createChainSnapshot(input);
-  const strategy = input.context?.strategy ?? DEFAULT_CONTEXT.strategy;
+  const chain = createOptionChain(input);
+  const strategy = input.context?.strategy ?? 'momentum';
+  const technical = input.technical ?? input.context?.technical ?? null;
   const metrics = deriveSignalMetrics(chain, input.context);
-  const signalScores = buildSignalScores(metrics, input.technical ?? null);
-
-  const confluence = safeConfluence({
-    chain,
+  const signalScores = buildSignalScores(metrics, technical);
+  const confluence = computeConfluence({
+    signals: signalScores,
     strategy,
-    signalScores,
-    metrics,
-    technical: input.technical ?? null,
+    timestamp: input.timestamp,
   });
 
   return {
+    symbol: input.symbol,
+    strategy,
     chain,
     metrics,
     signalScores,
     confluence,
+    generatedAt: input.timestamp ?? new Date().toISOString(),
+    technical,
   };
 }
 
 export function updateVolumeHistory(
   previousHistory: number[],
-  snapshot: AnalyticsSnapshot,
-  maxPoints = 50
-): number[] {
-  const next = [...previousHistory, snapshot.metrics.totalVolume].filter(
+  totalVolume: number,
+  maxPoints = 20
+) {
+  const next = [...previousHistory, totalVolume].filter(
     (value) => Number.isFinite(value) && value >= 0
   );
 
@@ -473,4 +429,3 @@ export function updateVolumeHistory(
 
   return next.slice(next.length - maxPoints);
 }
-

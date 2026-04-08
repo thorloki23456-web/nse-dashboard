@@ -1,4 +1,4 @@
-import type { Signal, PortfolioSnapshot, RiskConfig, RiskCheckResult, Order } from '../types';
+import type { Signal, PortfolioSnapshot, RiskConfig, RiskCheckResult } from '../types';
 
 export class RiskManager {
   constructor(private cfg: RiskConfig) {}

@@ -1,4 +1,6 @@
 import { Backtester } from '@/trading/backtester/engine';
+import { RiskManager } from '@/trading/risk/manager';
+import { breakoutSignal, meanReversionSignal } from '@/trading/signals/generators';
 import { momentumSignal } from '@/trading/signals/generators';
 import type { Candle } from '@/trading/types';
 
@@ -83,7 +85,6 @@ describe('Backtester', () => {
 });
 
 describe('RiskManager', () => {
-  const { RiskManager } = require('@/trading/risk/manager');
   const risk = new RiskManager({
     maxDrawdownPct: 0.10, dailyLossLimitPct: 0.02,
     maxPositionSizePct: 0.05, maxOpenPositions: 3, maxOrderQty: 100,
@@ -127,8 +128,6 @@ describe('RiskManager', () => {
 });
 
 describe('Signal generators', () => {
-  const { meanReversionSignal, breakoutSignal } = require('@/trading/signals/generators');
-
   it('meanReversionSignal returns null for flat data', () => {
     const flat = makeCandles(30, 100, 'flat');
     expect(meanReversionSignal('TEST', flat)).toBeNull();

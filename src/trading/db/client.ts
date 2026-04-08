@@ -1,4 +1,4 @@
-import type { Order, Position, PortfolioSnapshot, Signal } from '../types';
+import type { Order, PortfolioSnapshot, Signal } from '../types';
 
 // Supabase client is injected — no direct import to keep this module testable
 export interface SupabaseClient {

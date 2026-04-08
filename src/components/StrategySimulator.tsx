@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { Settings2, Activity, TrendingUp, BarChart3, Target } from 'lucide-react';
+import { Activity } from 'lucide-react';
 import { 
   generateMACrossover, 
   generateRSIMomentum, 

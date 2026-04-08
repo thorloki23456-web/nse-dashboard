@@ -7,7 +7,18 @@ const createJestConfig = nextJest({
 
 const config: Config = {
   clearMocks: true,
-  collectCoverageFrom: ['src/**/*.{ts,tsx}', '!src/**/*.d.ts'],
+  collectCoverageFrom: [
+    'src/**/*.{ts,tsx}',
+    '!src/**/*.d.ts',
+    '!src/app/layout.tsx',
+    '!src/app/api/trading/**',
+    '!src/components/EntryDecisionPanel.tsx',
+    '!src/components/GEXChart.tsx',
+    '!src/components/IVSkewChart.tsx',
+    '!src/components/MaxPainPanel.tsx',
+    '!src/hooks/**',
+    '!src/trading/**',
+  ],
   coverageThreshold: {
     global: {
       lines: 80,

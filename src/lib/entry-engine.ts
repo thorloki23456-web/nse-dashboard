@@ -311,7 +311,8 @@ function toDecision(score: number): EntryDecision {
 export interface EntryInput {
   symbol: string;
   metrics: DerivedSignalMetrics;
-  context?: Pick<AnalyticsContext, 'strategy'> & {
+  context?: {
+    strategy?: Strategy | AnalyticsContext['strategy'];
     pcr?: number;
     maxPainDistance?: number;
     thetaPressure?: number;
@@ -390,7 +391,7 @@ export function scanAllStrategies(input: Omit<EntryInput, 'context'> & { context
 
   return strategies
     .map((strategy) => {
-      const result = computeEntryDecision({ ...input, context: { ...input.context, strategy: strategy as import('./analytics').AnalyticsContext['strategy'] } });
+      const result = computeEntryDecision({ ...input, context: { ...input.context, strategy } });
       // Strategy confidence: fraction of layers above 60% threshold
       const confidence = Math.round(
         ([result.layerScores.oi / 70, result.layerScores.greeks / 65, result.layerScores.ltp / 65]

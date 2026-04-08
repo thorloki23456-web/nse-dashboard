@@ -1,29 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
 import { blackScholesGreeks } from '@/lib/greeks';
-
-interface OptionData {
-  strikePrice: number;
-  expiryDate: string;
-  CE?: {
-    openInterest: number;
-    changeinOpenInterest: number;
-    totalTradedVolume: number;
-    lastPrice: number;
-    impliedVolatility: number;
-  };
-  PE?: {
-    openInterest: number;
-    changeinOpenInterest: number;
-    totalTradedVolume: number;
-    lastPrice: number;
-    impliedVolatility: number;
-  };
-}
+import type { OptionStrike } from '@/lib/types';
 
 interface OptionChainTableProps {
-  data: OptionData[];
+  data: OptionStrike[];
   timestamp?: string;
   underlyingValue?: number;
 }

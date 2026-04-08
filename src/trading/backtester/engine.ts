@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type {
   Candle, Signal, Order, Fill, BacktestConfig,
-  BacktestResult, BacktestTrade, PerformanceMetrics, PortfolioSnapshot,
+  BacktestResult, BacktestTrade, PerformanceMetrics,
 } from '../types';
 import { Portfolio } from '../portfolio/tracker';
 import { RiskManager } from '../risk/manager';

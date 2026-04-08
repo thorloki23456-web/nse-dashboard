@@ -1,23 +1,11 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import { Play, Square, Settings2, ShieldAlert, CheckCircle2 } from 'lucide-react';
-
-interface OptionLeg {
-  openInterest: number;
-  changeinOpenInterest: number;
-  totalTradedVolume: number;
-  lastPrice: number;
-}
-
-interface OptionData {
-  strikePrice: number;
-  CE?: OptionLeg;
-  PE?: OptionLeg;
-}
+import type { OptionStrike } from '@/lib/types';
 
 interface StraddleTrackerProps {
-  data: OptionData[];
+  data: OptionStrike[];
 }
 
 type StrategyType = 'COMBINED_TRAILING' | 'INDIVIDUAL_LEG_PERCENT';
@@ -42,10 +30,6 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
   const [entryCE, setEntryCE] = useState<number>(0);
   const [entryPE, setEntryPE] = useState<number>(0);
 
-  // Real-time Data
-  const [currentCE, setCurrentCE] = useState<number>(0);
-  const [currentPE, setCurrentPE] = useState<number>(0);
-
   // Leg Status for INDIVIDUAL_LEG_PERCENT
   const [ceStatus, setCeStatus] = useState<'ACTIVE' | 'SL_HIT'>('ACTIVE');
   const [peStatus, setPeStatus] = useState<'ACTIVE' | 'SL_HIT'>('ACTIVE');
@@ -57,9 +41,70 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
   const [currentSL, setCurrentSL] = useState<number>(0);
 
   const entryPremium = entryCE + entryPE;
-  const activeCEPrice = ceStatus === 'ACTIVE' ? currentCE : ceExitPrice;
-  const activePEPrice = peStatus === 'ACTIVE' ? currentPE : peExitPrice;
+  const trackedOption = useMemo(
+    () => data.find((item) => item.strikePrice === trackedStrike),
+    [data, trackedStrike]
+  );
+  const liveCEPrice = trackedOption?.CE?.lastPrice ?? 0;
+  const livePEPrice = trackedOption?.PE?.lastPrice ?? 0;
+  const activeCEPrice = ceStatus === 'ACTIVE' ? liveCEPrice : ceExitPrice;
+  const activePEPrice = peStatus === 'ACTIVE' ? livePEPrice : peExitPrice;
   const currentPremium = activeCEPrice + activePEPrice;
+
+  const processTrackingUpdate = useEffectEvent((ceLtp: number, peLtp: number) => {
+    const newPremium = (ceStatus === 'ACTIVE' ? ceLtp : ceExitPrice) + (peStatus === 'ACTIVE' ? peLtp : peExitPrice);
+
+    const currentPointsGain = entryPremium - newPremium;
+    const currentMtm = currentPointsGain * lotSize * lots;
+
+    if (targetProfit > 0 && currentMtm >= targetProfit) {
+      if (ceStatus === 'ACTIVE') setCeExitPrice(ceLtp);
+      if (peStatus === 'ACTIVE') setPeExitPrice(peLtp);
+      setStatus('TARGET_HIT');
+      setIsTracking(false);
+      return;
+    }
+
+    if (strategyType === 'COMBINED_TRAILING') {
+      if (newPremium <= basePremium - tsl) {
+        setBasePremium(newPremium);
+        setCurrentSL(newPremium + stopLoss);
+      }
+
+      if (newPremium >= currentSL) {
+        setStatus('STOP_LOSS_HIT');
+        setIsTracking(false);
+      }
+      return;
+    }
+
+    let bothHit = true;
+
+    if (ceStatus === 'ACTIVE') {
+      const ceSlPrice = entryCE * (1 + stopLoss / 100);
+      if (ceLtp >= ceSlPrice) {
+        setCeStatus('SL_HIT');
+        setCeExitPrice(ceLtp);
+      } else {
+        bothHit = false;
+      }
+    }
+
+    if (peStatus === 'ACTIVE') {
+      const peSlPrice = entryPE * (1 + stopLoss / 100);
+      if (peLtp >= peSlPrice) {
+        setPeStatus('SL_HIT');
+        setPeExitPrice(peLtp);
+      } else {
+        bothHit = false;
+      }
+    }
+
+    if (bothHit && status === 'ACTIVE') {
+      setStatus('STOP_LOSS_HIT');
+      setIsTracking(false);
+    }
+  });
 
   // Identify ATM strike from real-time data
   const atmStrike = useMemo(() => {
@@ -84,81 +129,12 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
   useEffect(() => {
     if (!isTracking || status === 'IDLE' || !data || data.length === 0) return;
 
-    const currentOption = data.find(d => d.strikePrice === trackedStrike);
-    if (!currentOption) return;
+    if (!trackedOption) return;
 
-    const ceLtp = currentOption.CE?.lastPrice || 0;
-    const peLtp = currentOption.PE?.lastPrice || 0;
-
-    // Only update active legs
-    if (ceStatus === 'ACTIVE') setCurrentCE(ceLtp);
-    if (peStatus === 'ACTIVE') setCurrentPE(peLtp);
-
-    const ceActiveLtp = ceStatus === 'ACTIVE' ? ceLtp : ceExitPrice;
-    const peActiveLtp = peStatus === 'ACTIVE' ? peLtp : peExitPrice;
-    const newPremium = ceActiveLtp + peActiveLtp;
-
-    // Check Monetary Target Profit
-    const currentPointsGain = entryPremium - newPremium;
-    const currentMtm = currentPointsGain * lotSize * lots;
-
-    if (targetProfit > 0 && currentMtm >= targetProfit) {
-      if (ceStatus === 'ACTIVE') setCeExitPrice(ceLtp);
-      if (peStatus === 'ACTIVE') setPeExitPrice(peLtp);
-      setStatus('TARGET_HIT');
-      setIsTracking(false);
-      return;
-    }
-
-    if (strategyType === 'COMBINED_TRAILING') {
-      let newBasePremium = basePremium;
-      let newCurrentSL = currentSL;
-
-      // Trailing Logic
-      if (newPremium <= basePremium - tsl) {
-        newBasePremium = newPremium;
-        newCurrentSL = newPremium + stopLoss;
-        setBasePremium(newBasePremium);
-        setCurrentSL(newCurrentSL);
-      }
-
-      // Stop Loss Hit
-      if (newPremium >= newCurrentSL) {
-        setStatus('STOP_LOSS_HIT');
-        setIsTracking(false);
-      }
-    }
-    else if (strategyType === 'INDIVIDUAL_LEG_PERCENT') {
-      let bothHit = true;
-
-      if (ceStatus === 'ACTIVE') {
-        const ceSlPrice = entryCE * (1 + stopLoss / 100);
-        if (ceLtp >= ceSlPrice) {
-          setCeStatus('SL_HIT');
-          setCeExitPrice(ceLtp);
-        } else {
-          bothHit = false;
-        }
-      }
-
-      if (peStatus === 'ACTIVE') {
-        const peSlPrice = entryPE * (1 + stopLoss / 100);
-        if (peLtp >= peSlPrice) {
-          setPeStatus('SL_HIT');
-          setPeExitPrice(peLtp);
-        } else {
-          bothHit = false;
-        }
-      }
-
-      // If both legs hit SL
-      if (bothHit && status === 'ACTIVE') {
-        setStatus('STOP_LOSS_HIT');
-        setIsTracking(false);
-      }
-    }
-
-  }, [data, isTracking, status, trackedStrike, basePremium, currentSL, stopLoss, tsl, strategyType, entryCE, entryPE, targetProfit, entryPremium, lotSize, lots, ceStatus, peStatus, ceExitPrice, peExitPrice]);
+    const ceLtp = trackedOption.CE?.lastPrice || 0;
+    const peLtp = trackedOption.PE?.lastPrice || 0;
+    processTrackingUpdate(ceLtp, peLtp);
+  }, [data, isTracking, status, trackedOption]);
 
   const handleStart = () => {
     if (!atmStrike || !data) return;
@@ -175,9 +151,6 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
     setEntryPE(peLtp);
     setBasePremium(premium);
     setCurrentSL(premium + (strategyType === 'COMBINED_TRAILING' ? stopLoss : 0));
-
-    setCurrentCE(ceLtp);
-    setCurrentPE(peLtp);
 
     setCeStatus('ACTIVE');
     setPeStatus('ACTIVE');
@@ -196,8 +169,6 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
     setEntryTime('');
     setEntryCE(0);
     setEntryPE(0);
-    setCurrentCE(0);
-    setCurrentPE(0);
     setCeStatus('ACTIVE');
     setPeStatus('ACTIVE');
     setCeExitPrice(0);
@@ -313,10 +284,10 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
       <div className="p-5">
         {status === 'IDLE' ? (
           <div className="text-center py-8 text-zinc-500">
-            <p>Configure your strategy and click "Start" to simulate a Short Straddle at the ATM strike ({atmStrike || '...'})</p>
+            <p>Configure your strategy and click &quot;Start&quot; to simulate a Short Straddle at the ATM strike ({atmStrike || '...'})</p>
             <p className="text-xs mt-2 text-zinc-600 max-w-xl mx-auto">
-              {strategyType === 'INDIVIDUAL_LEG_PERCENT'
-                ? 'This strategy applies an independent percentage-based stop loss to the Call and Put options. If one leg hits the stop loss, it exits that leg but keeps the other running.'
+              {strategyType === 'INDIVIDUAL_LEG_PERCENT' 
+                ? 'This strategy applies an independent percentage-based stop loss to the Call and Put options. If one leg hits the stop loss, it exits that leg but keeps the other running.' 
                 : 'This strategy tracks the combined premium of both legs. If the premium shrinks, it trails the Stop Loss downward by your TSL points to lock in profits.'}
             </p>
           </div>
@@ -402,7 +373,7 @@ export default function StraddleTracker({ data }: StraddleTrackerProps) {
                   <div>
                     <div className="text-xs text-zinc-500 uppercase">Current Premium</div>
                     <div className="text-2xl font-mono text-white mt-1">{currentPremium.toFixed(2)}</div>
-                    <div className="text-xs text-zinc-500 mt-1">CE {currentCE} + PE {currentPE}</div>
+                    <div className="text-xs text-zinc-500 mt-1">CE {activeCEPrice.toFixed(2)} + PE {activePEPrice.toFixed(2)}</div>
                   </div>
                   <div>
                     <div className="text-xs text-zinc-500 uppercase">Trailing SL</div>

@@ -2,9 +2,8 @@
   "env": {
     "SUPABASE_URL": "https://cowvstccudemrdvavxtb.supabase.co",
     "SUPABASE_ANON_KEY": "sb_publishable_ae7emCIFj6wnv--H_ARy-A_UgDVN105",
-    "POSTGRES_URL": "postgresql://postgres:YOUR_PASSWORD@db.cowvstccudemrdvavxtb.supabase.co:5432/postgres",
-    "INITIAL_CAPITAL": "500000",
+    "TELEGRAM_DRY_RUN": "true",
     "TRADING_DRY_RUN": "true",
-    "TELEGRAM_DRY_RUN": "true"
+    "INITIAL_CAPITAL": "500000"
   }
 }

@@ -104,11 +104,11 @@ export function findSupportResistance(prices: number[], window: number = 20) {
   
   for (let i = 0; i < prices.length; i++) {
     if (i < window) {
-      let slice = prices.slice(0, i + 1);
+      const slice = prices.slice(0, i + 1);
       supportLvl.push(Math.min(...slice));
       resistanceLvl.push(Math.max(...slice));
     } else {
-      let slice = prices.slice(i - window, i); // up to previous price matching Python implementation
+      const slice = prices.slice(i - window, i); // up to previous price matching Python implementation
       supportLvl.push(Math.min(...slice));
       resistanceLvl.push(Math.max(...slice));
     }
@@ -125,7 +125,7 @@ export function calculateATR(prices: number[], period: number = 14): number[] {
       continue;
     }
     
-    let ranges: number[] = [];
+    const ranges: number[] = [];
     for (let j = i - period + 1; j <= i; j++) {
       if (j > 0) {
         // Simplified true range using close prices
