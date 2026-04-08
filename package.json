@@ -2,8 +2,12 @@
   "name": "nse-dashboard",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0 <25"
+  },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
+    "dev:turbo": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
