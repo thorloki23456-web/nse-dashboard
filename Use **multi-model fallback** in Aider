@@ -1,0 +1,4 @@
+aider \
+  --model gemini:gemini-1.5-flash \
+  --fallback-model groq/llama3-70b-8192 \
+  --secondary-model cerebras/llama3.1-8b
