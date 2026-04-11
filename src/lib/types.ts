@@ -185,4 +185,5 @@ export interface AnalyticsSnapshot {
   confluence: ConfluenceResult;
   generatedAt: string;
   technical?: TechnicalAnalysisSnapshot | null;
+  termStructure?: import('@/lib/termStructure.types').TermStructureSignalResult | null;
 }

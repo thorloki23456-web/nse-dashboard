@@ -99,15 +99,18 @@ export const niftyIntradayOptionStrategy = (symbol: string, candles: Candle[]): 
   // --- 8. Generate Signal
   return {
     id: randomUUID(),
+    // align the strategy payload with the shared Signal contract used by the execution pipeline
+    ts: latest.ts,
     symbol,
     side,
     kind,
+    strength: Math.round(Math.min(100, 40 + (normalizedVolatility * 10_000))),
     suggestedEntry: close,
     suggestedStop,
     suggestedTarget,
-    confidence: Math.min(0.3 + (normalizedVolatility * 500), 0.8), // higher vol = higher confidence
-    createdAt: latest.ts,
+    confidence: Math.round(Math.min(80, 30 + (normalizedVolatility * 50_000))), // higher vol = higher confidence
     meta: {
+      reason,
       rsi,
       atr,
       volatility: normalizedVolatility,

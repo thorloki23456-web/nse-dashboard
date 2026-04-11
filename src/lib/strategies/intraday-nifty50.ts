@@ -1,377 +1,488 @@
-import { OptionChain, SignalMetrics, ConfluenceRegime } from '../../lib/types';
-import { TechnicalAnalysisResponse } from '../../app/api/technical-analysis/route';
+import { blackScholesGreeks } from '@/lib/greeks';
+import type {
+  AnalyticsSnapshot,
+  MarketBias,
+  OptionLeg,
+  OptionSide,
+  OptionStrike,
+  TechnicalAnalysisSnapshot,
+} from '@/lib/types';
 
-/**
- * Core decision engine for Nifty 50 intraday options trading
- * Combines technical, sentiment, and options flow signals to choose CALL/PUT
- */
+export type NiftyLongOnlyAction = 'BUY_CE' | 'BUY_PE' | 'NO_TRADE';
 
-interface NiftySignalInput {
-  price: number;
-  technical: TechnicalAnalysisResponse;
-  optionChain: OptionChain;
-  metrics: SignalMetrics;
-}
-
-interface TradeDecision {
-  recommendation: 'CALL' | 'PUT' | 'NEUTRAL';
-  confidence: number; // 0.0 to 1.0
-  rationale: string[];
-  entryZone: { min: number; max: number };
-  stopLoss: number;
-  target: number;
-}
-
-interface SignalScore {
-  name: string;
-  score: number; // -1.0 to +1.0
-  weight: number;
+export interface NiftyDecisionContribution {
+  label: string;
+  score: number;
   explanation: string;
 }
 
-export class Nifty50IntradayEngine {
-  private readonly config = {
-    // Weights sum to 1.0 - adjusted based on historical regime performance
-    weights: {
-      technical: 0.35,
-      oiSentiment: 0.30,
-      volatility: 0.20,
-      priceAction: 0.15,
-    },
-    // Nifty-specific thresholds
-    thresholds: {
-      overboughtRSI: 70,
-      oversoldRSI: 30,
-      highIV: 18,
-      lowIV: 12,
-      extremePCR: 1.3,
-      lowPCR: 0.7,
-    },
+export interface SuggestedContract {
+  strike: number;
+  optionType: OptionSide;
+  premium: number;
+  openInterest: number;
+  volume: number;
+  delta: number;
+  liquidityScore: number;
+}
+
+export interface NiftyLongOnlyDecision {
+  action: NiftyLongOnlyAction;
+  optionType: OptionSide | 'NEUTRAL';
+  marketBias: MarketBias;
+  confidence: number;
+  convictionScore: number;
+  selectedContract: SuggestedContract | null;
+  entryWindow: {
+    underlyingMin: number;
+    underlyingMax: number;
+    premiumMin: number;
+    premiumMax: number;
+  } | null;
+  risk: {
+    stopUnderlying: number | null;
+    targetUnderlying: number | null;
+    stopPremium: number | null;
+    targetPremium: number | null;
   };
+  reasons: string[];
+  blockers: string[];
+  contributions: NiftyDecisionContribution[];
+  generatedAt: string;
+}
 
-  /**
-   * Main decision method - determines whether to buy CALL or PUT
-   */
-  decide(input: NiftySignalInput): TradeDecision {
-    const { price, technical, optionChain, metrics } = input;
-    
-    // Generate all signals with scores
-    const signals = this.generateSignals(input);
-    
-    // Calculate weighted composite score
-    const compositeScore = this.calculateCompositeScore(signals);
-    
-    // Determine recommendation based on score
-    const { recommendation, confidence, rationale } = 
-      this.interpretScore(compositeScore, signals, price);
-    
-    // Calculate key levels
-    const atr = technical.indicators.find(i => i.name === 'ATR')?.value || 150;
-    const volatilityFactor = metrics.impliedVolatility > this.config.thresholds.highIV ? 0.8 : 1.2;
-    
-    const baseRisk = atr * volatilityFactor;
-    const entryBuffer = baseRisk * 0.3;
-    
-    return {
-      recommendation,
-      confidence,
-      rationale,
-      entryZone: {
-        min: price - entryBuffer,
-        max: price + entryBuffer,
-      },
-      stopLoss: recommendation === 'CALL' 
-        ? price - baseRisk 
-        : price + baseRisk,
-      target: recommendation === 'CALL'
-        ? price + (baseRisk * 1.5)
-        : price - (baseRisk * 1.5),
-    };
+const NIFTY_SYMBOLS = new Set(['NIFTY', 'NIFTY 50']);
+const DEFAULT_IV = 0.18;
+const DEFAULT_TIME_TO_EXPIRY_YEARS = 7 / 365;
+const RISK_FREE_RATE = 0.1;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function round(value: number, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+function parseExpiryDate(expiryDate?: string | null) {
+  if (!expiryDate) {
+    return null;
   }
 
-  private generateSignals(input: NiftySignalInput): SignalScore[] {
-    const { price, technical, optionChain, metrics } = input;
-    const signals: SignalScore[] = [];
-
-    // 1. Technical Signals (Trend & Momentum)
-    const trendSignal = this.analyzeTechnicalSignals(technical);
-    signals.push(trendSignal);
-
-    // 2. OI Sentiment Signals (Smart Money Detection)
-    const oiSignal = this.analyzeOISentiment(optionChain, metrics);
-    signals.push(oiSignal);
-
-    // 3. Volatility Regime Signals
-    const volSignal = this.analyzeVolatilityRegime(metrics);
-    signals.push(volSignal);
-
-    // 4. Price Action Signals (Support/Resistance)
-    const paSignal = this.analyzePriceAction(price, technical);
-    signals.push(paSignal);
-
-    return signals;
+  const match = expiryDate.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+  if (!match) {
+    return null;
   }
 
-  private analyzeTechnicalSignals(technical: TechnicalAnalysisResponse): SignalScore {
-    const rsi = technical.indicators.find(i => i.name === 'RSI')?.value || 50;
-    const macd = technical.indicators.find(i => i.name === 'MACD')?.value || 0;
-    const signalLine = technical.indicators.find(i => i.name === 'MACD_SIGNAL')?.value || 0;
-    const sma20 = technical.indicators.find(i => i.name === 'SMA_20')?.value || 0;
-    const sma50 = technical.indicators.find(i => i.name === 'SMA_50')?.value || 0;
-    
-    let score = 0;
-    const explanations: string[] = [];
-
-    // RSI-based momentum
-    if (rsi < this.config.thresholds.oversoldRSI) {
-      score += 0.8;
-      explanations.push("RSI oversold suggesting bullish reversal");
-    } else if (rsi > this.config.thresholds.overboughtRSI) {
-      score -= 0.8;
-      explanations.push("RSI overbought suggesting bearish reversal");
-    }
-
-    // MACD crossover
-    if (macd > signalLine) {
-      score += 0.6;
-      explanations.push("MACD bullish crossover");
-    } else if (macd < signalLine) {
-      score -= 0.6;
-      explanations.push("MACD bearish crossover");
-    }
-
-    // Trend alignment
-    if (sma20 > sma50) {
-      score += 0.4;
-      explanations.push("Uptrend: 20SMA > 50SMA");
-    } else {
-      score -= 0.4;
-      explanations.push("Downtrend: 20SMA < 50SMA");
-    }
-
-    return {
-      name: 'technical',
-      score: Math.max(-1, Math.min(1, score / 2)), // Normalize to -1 to 1
-      weight: this.config.weights.technical,
-      explanation: explanations.join("; "),
-    };
+  const [, dayText, monthText, yearText] = match;
+  const monthIndex = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(monthText);
+  if (monthIndex < 0) {
+    return null;
   }
 
-  private analyzeOISentiment(optionChain: OptionChain, metrics: SignalMetrics): SignalScore {
-    const { data, underlyingValue } = optionChain;
-    const { pcr, oiImbalance, maxPainDistance } = metrics;
-    
-    let score = 0;
-    const explanations: string[] = [];
-    const atmStrike = this.findATMStrike(data, underlyingValue);
+  return new Date(Date.UTC(Number(yearText), monthIndex, Number(dayText), 9, 15));
+}
 
-    // PCR Analysis
-    if (pcr > this.config.thresholds.extremePCR) {
-      score += 0.7; // High PCR = more puts = potential bottom
-      explanations.push("Extreme PCR suggests oversold condition");
-    } else if (pcr < this.config.thresholds.lowPCR) {
-      score -= 0.7; // Low PCR = more calls = potential top
-      explanations.push("Low PCR suggests overbought condition");
-    }
-
-    // OI Imbalance (Call OI vs Put OI)
-    if (oiImbalance > 0.3) {
-      score += 0.6; // More call OI buildup
-      explanations.push("Call OI dominance suggests bullish sentiment");
-    } else if (oiImbalance < -0.3) {
-      score -= 0.6; // More put OI buildup
-      explanations.push("Put OI dominance suggests bearish sentiment");
-    }
-
-    // Max Pain effect
-    if (Math.abs(maxPainDistance) < 0.5) {
-      // Price near max pain - expect mean reversion
-      const maxPainBias = this.calculateMaxPainBias(data, underlyingValue);
-      score += maxPainBias * 0.5;
-      explanations.push("Price near max pain zone - mean reversion likely");
-    }
-
-    // Unusual OI changes at key strikes
-    const unusualActivity = this.detectUnusualOIActivity(data, underlyingValue);
-    if (unusualActivity.strongCalls) {
-      score += 0.4;
-      explanations.push("Unusual call writing at resistance");
-    }
-    if (unusualActivity.strongPuts) {
-      score -= 0.4;
-      explanations.push("Unusual put writing at support");
-    }
-
-    return {
-      name: 'oiSentiment',
-      score: Math.max(-1, Math.min(1, score / 2.2)),
-      weight: this.config.weights.oiSentiment,
-      explanation: explanations.join("; "),
-    };
+function resolveTimeToExpiryYears(snapshot: AnalyticsSnapshot) {
+  const expiryDate = parseExpiryDate(snapshot.chain.expiryDate);
+  if (!expiryDate) {
+    return DEFAULT_TIME_TO_EXPIRY_YEARS;
   }
 
-  private analyzeVolatilityRegime(metrics: SignalMetrics): SignalScore {
-    const { impliedVolatility, ivSkew, gex } = metrics;
-    let score = 0;
-    const explanations: string[] = [];
+  const asOf = snapshot.generatedAt ? new Date(snapshot.generatedAt) : new Date();
+  const diffMs = expiryDate.getTime() - asOf.getTime();
+  const diffDays = clamp(diffMs / (1000 * 60 * 60 * 24), 0.25, 30);
+  return diffDays / 365;
+}
 
-    // IV Level
-    if (impliedVolatility > this.config.thresholds.highIV) {
-      score -= 0.6; // High IV = expensive options, favor selling
-      explanations.push("High IV favors put writing");
-    } else if (impliedVolatility < this.config.thresholds.lowIV) {
-      score += 0.6; // Low IV = cheap options, favor buying
-      explanations.push("Low IV favors call buying");
-    }
-
-    // IV Skew (put vs call expensiveness)
-    if (ivSkew > 0.1) {
-      score -= 0.5; // Puts more expensive than calls
-      explanations.push("Positive skew favors call buying");
-    } else if (ivSkew < -0.1) {
-      score += 0.5; // Calls more expensive than puts
-      explanations.push("Negative skew favors put buying");
-    }
-
-    // Gamma Exposure effect
-    if (gex > 1000000) {
-      score += 0.4; // High positive GEX = market makers hedging long = support
-      explanations.push("High GEX provides price support");
-    } else if (gex < -1000000) {
-      score -= 0.4; // High negative GEX = market makers hedging short = resistance
-      explanations.push("Negative GEX creates price resistance");
-    }
-
-    return {
-      name: 'volatility',
-      score: Math.max(-1, Math.min(1, score / 1.5)),
-      weight: this.config.weights.volatility,
-      explanation: explanations.join("; "),
-    };
+function getStepSize(strikes: OptionStrike[]) {
+  const unique = [...new Set(strikes.map((strike) => strike.strikePrice))].sort((a, b) => a - b);
+  if (unique.length < 2) {
+    return 50;
   }
 
-  private analyzePriceAction(price: number, technical: TechnicalAnalysisResponse): SignalScore {
-    const support = technical.levels?.support?.[0] || 0;
-    const resistance = technical.levels?.resistance?.[0] || 0;
-    const volatility = technical.indicators.find(i => i.name === 'ATR')?.value || 150;
-    
-    let score = 0;
-    const explanations: string[] = [];
-
-    // Proximity to key levels
-    const distToSupport = price - support;
-    const distToResistance = resistance - price;
-
-    if (distToSupport < volatility * 0.5) {
-      score += 0.6;
-      explanations.push("Near support level");
-    } else if (distToResistance < volatility * 0.5) {
-      score -= 0.6;
-      explanations.push("Near resistance level");
-    }
-
-    // Breakout/breakdown detection
-    const recentHigh = technical.indicators.find(i => i.name === 'HIGH_5')?.value || 0;
-    const recentLow = technical.indicators.find(i => i.name === 'LOW_5')?.value || 0;
-
-    if (price > resistance) {
-      score += 0.5;
-      explanations.push("Breaking above resistance");
-    } else if (price < support) {
-      score -= 0.5;
-      explanations.push("Breaking below support");
-    }
-
-    // Momentum confirmation
-    const close = technical.currentPrice || price;
-    const open = technical.indicators.find(i => i.name === 'OPEN')?.value || price;
-    
-    if (close > open) {
-      score += 0.3;
-      explanations.push("Bullish candle pattern");
-    } else {
-      score -= 0.3;
-      explanations.push("Bearish candle pattern");
-    }
-
-    return {
-      name: 'priceAction',
-      score: Math.max(-1, Math.min(1, score / 1.4)),
-      weight: this.config.weights.priceAction,
-      explanation: explanations.join("; "),
-    };
+  let step = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < unique.length; index += 1) {
+    step = Math.min(step, Math.abs(unique[index] - unique[index - 1]));
   }
 
-  private calculateCompositeScore(signals: SignalScore[]): number {
-    return signals.reduce((total, signal) => {
-      return total + (signal.score * signal.weight);
-    }, 0);
+  return Number.isFinite(step) && step > 0 ? step : 50;
+}
+
+function estimateAbsoluteDelta(
+  leg: OptionLeg,
+  snapshot: AnalyticsSnapshot,
+  strikePrice: number,
+  optionType: OptionSide,
+  timeToExpiryYears: number
+) {
+  if (typeof leg.delta === 'number' && Number.isFinite(leg.delta)) {
+    return Math.abs(leg.delta);
   }
 
-  private interpretScore(
-    score: number, 
-    signals: SignalScore[], 
-    price: number
-  ): Pick<TradeDecision, 'recommendation' | 'confidence' | 'rationale'> {
-    const rationale = signals.map(s => `${s.name}: ${s.explanation}`).concat();
-    
-    // Higher threshold for entries - avoid weak signals
-    if (score > 0.35) {
-      return {
-        recommendation: 'CALL',
-        confidence: Math.min(0.95, score),
-        rationale,
-      };
-    } else if (score < -0.35) {
-      return {
-        recommendation: 'PUT',
-        confidence: Math.min(0.95, -score),
-        rationale,
-      };
-    } else {
-      return {
-        recommendation: 'NEUTRAL',
-        confidence: 1 - (Math.abs(score) / 0.35),
-        rationale: [...rationale, "Composite score neutral - no clear edge"],
-      };
-    }
-  }
+  const sigma = Math.max(DEFAULT_IV, leg.impliedVolatility / 100 || DEFAULT_IV);
+  return Math.abs(
+    blackScholesGreeks(
+      snapshot.chain.underlyingValue,
+      strikePrice,
+      timeToExpiryYears,
+      RISK_FREE_RATE,
+      sigma,
+      optionType === 'CE'
+    ).delta
+  );
+}
 
-  private findATMStrike(data: any[], price: number): any {
-    return data.reduce((prev, curr) => {
-      return (Math.abs(curr.strike - price) < Math.abs(prev.strike - price) ? curr : prev);
-    });
-  }
+function scoreCandidate(
+  strike: OptionStrike,
+  leg: OptionLeg,
+  snapshot: AnalyticsSnapshot,
+  optionType: OptionSide,
+  targetDelta: number,
+  stepSize: number,
+  timeToExpiryYears: number
+) {
+  const delta = estimateAbsoluteDelta(leg, snapshot, strike.strikePrice, optionType, timeToExpiryYears);
+  const deltaFit = 1 - clamp(Math.abs(delta - targetDelta) / 0.4, 0, 1);
+  const distanceFit = 1 - clamp(Math.abs(strike.strikePrice - snapshot.chain.underlyingValue) / (stepSize * 4), 0, 1);
+  const liquidityScore = clamp(Math.log10(Math.max(1, leg.openInterest)) + Math.log10(Math.max(1, leg.totalTradedVolume)), 0, 10);
+  const premiumFit =
+    leg.lastPrice < 20 ? clamp(leg.lastPrice / 20, 0, 1) :
+    leg.lastPrice > 350 ? clamp(1 - (leg.lastPrice - 350) / 350, 0, 1) :
+    1;
 
-  private calculateMaxPainBias(data: any[], price: number): number {
-    // Simplified: if max pain > price, bias = +1 (bullish)
-    // if max pain < price, bias = -1 (bearish)
-    const totalCallValue = data.reduce((sum, strike) => sum + (strike.strike > price ? strike.callOI * (strike.strike - price) : 0), 0);
-    const totalPutValue = data.reduce((sum, strike) => sum + (strike.strike < price ? strike.putOI * (price - strike.strike) : 0), 0);
-    
-    return totalCallValue > totalPutValue ? 1 : -1;
-  }
+  return {
+    score: round((deltaFit * 55) + (distanceFit * 15) + (premiumFit * 10) + (liquidityScore * 2), 3),
+    delta: round(delta, 3),
+    liquidityScore: round(liquidityScore, 3),
+  };
+}
 
-  private detectUnusualOIActivity(data: any[], price: number) {
-    const atmWindow = 100; // ±100 points around ATM
-    const strikesOfInterest = data.filter(s => Math.abs(s.strike - price) < atmWindow);
-    
-    let strongCalls = false;
-    let strongPuts = false;
+function selectContract(
+  snapshot: AnalyticsSnapshot,
+  optionType: OptionSide,
+  confidence: number
+): SuggestedContract | null {
+  const stepSize = getStepSize(snapshot.chain.data);
+  const timeToExpiryYears = resolveTimeToExpiryYears(snapshot);
+  const targetDelta = confidence >= 78 ? 0.55 : confidence >= 65 ? 0.45 : 0.35;
 
-    // Look for unusual OI concentration
-    const avgCallOI = strikesOfInterest.reduce((sum, s) => sum + (s.callOI || 0), 0) / strikesOfInterest.length;
-    const avgPutOI = strikesOfInterest.reduce((sum, s) => sum + (s.putOI || 0), 0) / strikesOfInterest.length;
-
-    strikesOfInterest.forEach(strike => {
-      if (strike.callOI > avgCallOI * 2 && strike.strike > price) {
-        strongCalls = true;
+  const candidates = snapshot.chain.data
+    .map((strike) => {
+      const leg = strike[optionType];
+      if (!leg || leg.lastPrice <= 0 || leg.openInterest <= 0 || leg.totalTradedVolume <= 0) {
+        return null;
       }
-      if (strike.putOI > avgPutOI * 2 && strike.strike < price) {
-        strongPuts = true;
-      }
-    });
 
-    return { strongCalls, strongPuts };
+      const scored = scoreCandidate(
+        strike,
+        leg,
+        snapshot,
+        optionType,
+        targetDelta,
+        stepSize,
+        timeToExpiryYears
+      );
+
+      return {
+        strike: strike.strikePrice,
+        optionType,
+        premium: round(leg.lastPrice),
+        openInterest: leg.openInterest,
+        volume: leg.totalTradedVolume,
+        delta: scored.delta,
+        liquidityScore: scored.liquidityScore,
+        candidateScore: scored.score,
+      };
+    })
+    .filter((candidate): candidate is SuggestedContract & { candidateScore: number } => Boolean(candidate))
+    .sort((left, right) => right.candidateScore - left.candidateScore);
+
+  if (candidates.length === 0) {
+    return null;
   }
+
+  const { candidateScore: _ignored, ...selected } = candidates[0];
+  return selected;
+}
+
+function biasFromScore(score: number): MarketBias {
+  if (score >= 1) {
+    return 'bullish';
+  }
+  if (score <= -1) {
+    return 'bearish';
+  }
+  return 'neutral';
+}
+
+function addContribution(
+  contributions: NiftyDecisionContribution[],
+  label: string,
+  score: number,
+  explanation: string
+) {
+  if (Math.abs(score) < 0.01) {
+    return 0;
+  }
+
+  const rounded = round(score, 2);
+  contributions.push({ label, score: rounded, explanation });
+  return rounded;
+}
+
+function scoreTechnical(technical: TechnicalAnalysisSnapshot | null, contributions: NiftyDecisionContribution[]) {
+  if (!technical) {
+    return 0;
+  }
+
+  let score = 0;
+  score += addContribution(
+    contributions,
+    'spot_signal',
+    technical.signal === 'BUY' ? 20 : technical.signal === 'SELL' ? -20 : 0,
+    `Spot signal is ${technical.signal}.`
+  );
+  score += addContribution(
+    contributions,
+    'trend',
+    technical.currentTrend === 'up' ? 12 : technical.currentTrend === 'down' ? -12 : 0,
+    `SuperTrend is ${technical.currentTrend}.`
+  );
+
+  const rsi = technical.currentRSI;
+  const rsiScore =
+    technical.currentTrend === 'up' && rsi >= 52 && rsi <= 68 ? 8 :
+    technical.currentTrend === 'down' && rsi >= 32 && rsi <= 48 ? -8 :
+    rsi > 72 ? -4 :
+    rsi < 28 ? 4 :
+    0;
+
+  score += addContribution(
+    contributions,
+    'rsi',
+    rsiScore,
+    `RSI is ${round(rsi, 1)}.`
+  );
+
+  return score;
+}
+
+function computeDirectionalScore(snapshot: AnalyticsSnapshot) {
+  const { confluence, metrics, termStructure } = snapshot;
+  const contributions: NiftyDecisionContribution[] = [];
+  let score = 0;
+
+  score += addContribution(
+    contributions,
+    'confluence_net',
+    clamp(confluence.netScore * 0.9, -26, 26),
+    `Confluence net score is ${round(confluence.netScore)} with ${round(confluence.confidence, 1)}% confidence.`
+  );
+  score += addContribution(
+    contributions,
+    'confluence_confidence',
+    confluence.regime === 'LONG'
+      ? clamp((confluence.confidence - 50) * 0.35, 0, 10)
+      : confluence.regime === 'SHORT'
+        ? -clamp((confluence.confidence - 50) * 0.35, 0, 10)
+        : 0,
+    `Confluence regime is ${confluence.regime}.`
+  );
+  score += scoreTechnical(snapshot.technical ?? null, contributions);
+  score += addContribution(
+    contributions,
+    'oi_imbalance',
+    clamp(metrics.oiImbalance * 0.45, -14, 14),
+    `Delta-weighted OI imbalance is ${round(metrics.oiImbalance)}.`
+  );
+  score += addContribution(
+    contributions,
+    'gamma_flip',
+    clamp(metrics.gammaFlip * 5, -10, 10),
+    `Gamma-flip distance is ${round(metrics.gammaFlip, 2)}.`
+  );
+  score += addContribution(
+    contributions,
+    'price_vs_vwap',
+    clamp(metrics.ltpVsVwapPct * 10, -12, 12),
+    `Spot sits ${round(metrics.ltpVsVwapPct, 2)}% versus synthetic VWAP.`
+  );
+  score += addContribution(
+    contributions,
+    'pcr_regime',
+    clamp((1.05 - metrics.pcr) * 20, -10, 10),
+    `PCR regime is ${round(metrics.pcr, 2)}.`
+  );
+
+  const anchorBias = score === 0 ? 0 : Math.sign(score);
+  score += addContribution(
+    contributions,
+    'flow_follow_through',
+    anchorBias * clamp((metrics.uvr - 1) * 8, 0, 8),
+    `Unusual volume ratio is ${round(metrics.uvr, 2)}.`
+  );
+
+  if (termStructure?.recommendation) {
+    const termDirection = termStructure.recommendation.direction;
+    score += addContribution(
+      contributions,
+      'term_structure',
+      termDirection === 'BULLISH' ? 6 : termDirection === 'BEARISH' ? -6 : 0,
+      `Weekly term structure leans ${termDirection}.`
+    );
+  }
+
+  return { score: round(score, 2), contributions };
+}
+
+function buildBlockers(snapshot: AnalyticsSnapshot, score: number, optionType: OptionSide | 'NEUTRAL') {
+  const blockers: string[] = [];
+  const technical = snapshot.technical;
+  const { metrics, confluence } = snapshot;
+
+  // hard gates keep the selector from forcing trades when the edge is weak or contradictory.
+  if (!technical) {
+    blockers.push('Intraday technical confirmation is unavailable.');
+  }
+
+  if (snapshot.chain.data.length < 3) {
+    blockers.push('Option chain depth is too shallow for strike selection.');
+  }
+
+  if (confluence.confidence < 55) {
+    blockers.push('Confluence confidence is below the minimum trade threshold.');
+  }
+
+  if (Math.abs(score) < 20) {
+    blockers.push('Directional edge stayed below the minimum conviction threshold.');
+  }
+
+  if (metrics.uvr < 1.15) {
+    blockers.push('Flow follow-through is too weak for an intraday long option entry.');
+  }
+
+  if (metrics.vpin > 70 && Math.abs(score) < 35) {
+    blockers.push('Flow toxicity is elevated and conviction is not strong enough.');
+  }
+
+  if (metrics.ivRank > 80 && metrics.thetaPressure > 45 && Math.abs(score) < 35) {
+    blockers.push('Premium is too rich for a clean long-premium intraday trade.');
+  }
+
+  if (technical && optionType === 'CE' && (technical.signal === 'SELL' || technical.currentTrend === 'down')) {
+    blockers.push('Spot trend does not confirm a bullish long.');
+  }
+
+  if (technical && optionType === 'PE' && (technical.signal === 'BUY' || technical.currentTrend === 'up')) {
+    blockers.push('Spot trend does not confirm a bearish long.');
+  }
+
+  return blockers;
+}
+
+function buildRiskProfile(
+  snapshot: AnalyticsSnapshot,
+  contract: SuggestedContract | null,
+  optionType: OptionSide | 'NEUTRAL'
+) {
+  if (!contract || !snapshot.technical || optionType === 'NEUTRAL') {
+    return {
+      stopUnderlying: null,
+      targetUnderlying: null,
+      stopPremium: null,
+      targetPremium: null,
+    };
+  }
+
+  const anchorPrice = snapshot.technical.currentPrice ?? snapshot.chain.underlyingValue;
+  const atr = Math.max(snapshot.technical.currentATR, anchorPrice * 0.0025);
+  const stopDistance = atr * 0.8;
+  const targetDistance = atr * 1.6;
+  const stopUnderlying = optionType === 'CE' ? anchorPrice - stopDistance : anchorPrice + stopDistance;
+  const targetUnderlying = optionType === 'CE' ? anchorPrice + targetDistance : anchorPrice - targetDistance;
+
+  return {
+    stopUnderlying: round(stopUnderlying),
+    targetUnderlying: round(targetUnderlying),
+    stopPremium: round(contract.premium * 0.75),
+    targetPremium: round(contract.premium * 1.4),
+  };
+}
+
+function buildEntryWindow(
+  snapshot: AnalyticsSnapshot,
+  contract: SuggestedContract | null,
+  optionType: OptionSide | 'NEUTRAL'
+) {
+  if (!contract || !snapshot.technical || optionType === 'NEUTRAL') {
+    return null;
+  }
+
+  const anchorPrice = snapshot.technical.currentPrice ?? snapshot.chain.underlyingValue;
+  const atr = Math.max(snapshot.technical.currentATR, anchorPrice * 0.0025);
+  const minUnderlying = optionType === 'CE' ? anchorPrice - atr * 0.1 : anchorPrice - atr * 0.25;
+  const maxUnderlying = optionType === 'CE' ? anchorPrice + atr * 0.25 : anchorPrice + atr * 0.1;
+
+  return {
+    underlyingMin: round(minUnderlying),
+    underlyingMax: round(maxUnderlying),
+    premiumMin: round(contract.premium * 0.97),
+    premiumMax: round(contract.premium * 1.03),
+  };
+}
+
+export function selectNiftyLongOnlyTrade(snapshot: AnalyticsSnapshot | null): NiftyLongOnlyDecision | null {
+  if (!snapshot || !NIFTY_SYMBOLS.has(snapshot.symbol.toUpperCase())) {
+    return null;
+  }
+
+  const { score, contributions } = computeDirectionalScore(snapshot);
+  const marketBias = biasFromScore(score);
+  const optionType = score >= 20 ? 'CE' : score <= -20 ? 'PE' : 'NEUTRAL';
+  const rawConfidence = clamp(52 + Math.abs(score) * 0.8, 0, 95);
+  const selectedContract = optionType === 'NEUTRAL' ? null : selectContract(snapshot, optionType, rawConfidence);
+  const blockers = buildBlockers(snapshot, score, optionType);
+
+  if ((optionType === 'CE' || optionType === 'PE') && !selectedContract) {
+    blockers.push('No liquid contract near the target delta was available.');
+  }
+
+  const finalAction =
+    blockers.length > 0 || optionType === 'NEUTRAL'
+      ? 'NO_TRADE'
+      : optionType === 'CE'
+        ? 'BUY_CE'
+        : 'BUY_PE';
+
+  const reasons = contributions
+    .filter((item) => (finalAction === 'BUY_CE' ? item.score > 0 : finalAction === 'BUY_PE' ? item.score < 0 : Math.abs(item.score) >= 6))
+    .sort((left, right) => Math.abs(right.score) - Math.abs(left.score))
+    .slice(0, 4)
+    .map((item) => `${item.label}: ${item.explanation}`);
+
+  const confidence = round(
+    finalAction === 'NO_TRADE'
+      ? clamp(Math.abs(score) - (blockers.length * 4), 0, 55)
+      : clamp(rawConfidence - (blockers.length * 6), 0, 95),
+    1
+  );
+
+  return {
+    action: finalAction,
+    optionType: finalAction === 'NO_TRADE' ? 'NEUTRAL' : optionType,
+    marketBias,
+    confidence,
+    convictionScore: round(score, 1),
+    selectedContract: finalAction === 'NO_TRADE' ? null : selectedContract,
+    entryWindow: finalAction === 'NO_TRADE' ? null : buildEntryWindow(snapshot, selectedContract, optionType),
+    risk: finalAction === 'NO_TRADE'
+      ? { stopUnderlying: null, targetUnderlying: null, stopPremium: null, targetPremium: null }
+      : buildRiskProfile(snapshot, selectedContract, optionType),
+    reasons,
+    blockers,
+    contributions: contributions.sort((left, right) => Math.abs(right.score) - Math.abs(left.score)),
+    generatedAt: snapshot.generatedAt,
+  };
 }

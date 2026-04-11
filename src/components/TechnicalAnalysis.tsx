@@ -1,33 +1,37 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import type { TechnicalAnalysisSnapshot, TechnicalCandleSnapshot } from '@/lib/types';
 
-interface CandleData {
-  time: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  atr: number;
-  superTrend: number;
-  trend: 'up' | 'down' | 'none';
-  rsi: number;
-}
-
-interface AnalysisData {
-  signal: 'BUY' | 'SELL' | 'NEUTRAL';
-  signalReason: string;
-  currentTrend: 'up' | 'down' | 'none';
-  currentRSI: number;
-  currentATR: number;
-  superTrendValue: number;
-}
+type CandleData = TechnicalCandleSnapshot;
+type AnalysisData = TechnicalAnalysisSnapshot;
 
 interface TechnicalAnalysisProps {
   symbol: string;
+  analysisData?: AnalysisData | null;
+  recentCandleData?: CandleData[];
+  currentPriceValue?: number;
+  candleCountValue?: number;
+  loadingState?: boolean;
+  errorMessage?: string;
 }
 
-export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
+export default function TechnicalAnalysis({
+  symbol,
+  analysisData,
+  recentCandleData,
+  currentPriceValue,
+  candleCountValue,
+  loadingState,
+  errorMessage,
+}: TechnicalAnalysisProps) {
+  const usesExternalData =
+    analysisData !== undefined ||
+    recentCandleData !== undefined ||
+    currentPriceValue !== undefined ||
+    candleCountValue !== undefined ||
+    loadingState !== undefined ||
+    errorMessage !== undefined;
   const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
   const [recentData, setRecentData] = useState<CandleData[]>([]);
   const [currentPrice, setCurrentPrice] = useState<number>(0);
@@ -36,7 +40,7 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
   const [error, setError] = useState<string>('');
 
   useEffect(() => {
-    if (!symbol) return;
+    if (!symbol || usesExternalData) return;
 
     const fetchAnalysis = () => {
       setLoading(true);
@@ -60,9 +64,16 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
     fetchAnalysis();
     const interval = setInterval(fetchAnalysis, 30000); // refresh every 30s
     return () => clearInterval(interval);
-  }, [symbol]);
+  }, [symbol, usesExternalData]);
 
   if (!symbol) return null;
+
+  const displayAnalysis = usesExternalData ? analysisData ?? null : analysis;
+  const displayRecentData = usesExternalData ? recentCandleData ?? [] : recentData;
+  const displayCurrentPrice = usesExternalData ? currentPriceValue ?? 0 : currentPrice;
+  const displayCandleCount = usesExternalData ? candleCountValue ?? 0 : candleCount;
+  const displayLoading = usesExternalData ? loadingState ?? false : loading;
+  const displayError = usesExternalData ? errorMessage ?? '' : error;
 
   const signalConfig = {
     BUY: {
@@ -116,7 +127,7 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
           Technical Analysis
           <span className="text-sm font-normal text-zinc-500 ml-2">(3-min candles • SuperTrend 7,2.5 • RSI 7)</span>
         </h2>
-        {loading && (
+        {displayLoading && (
           <div className="flex items-center gap-2 text-blue-400 text-sm">
             <div className="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin"></div>
             Analyzing...
@@ -124,39 +135,39 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
         )}
       </div>
 
-      {error && (
+      {displayError && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/5 p-4 text-yellow-400 text-sm">
-          ⚠️ {error} — Market may be closed. Analysis will be available during trading hours.
+          ⚠️ {displayError} — Market may be closed. Analysis will be available during trading hours.
         </div>
       )}
 
-      {analysis && (
+      {displayAnalysis && (
         <>
           {/* Signal Card */}
-          <div className={`rounded-xl border-2 ${signalConfig[analysis.signal].border} ${signalConfig[analysis.signal].bg} p-6`}>
+          <div className={`rounded-xl border-2 ${signalConfig[displayAnalysis.signal].border} ${signalConfig[displayAnalysis.signal].bg} p-6`}>
             <div className="flex items-center justify-between flex-wrap gap-4">
               <div>
                 <div className="flex items-center gap-3 mb-2">
-                  <span className="text-3xl">{signalConfig[analysis.signal].icon}</span>
-                  <span className={`text-3xl font-black ${signalConfig[analysis.signal].text}`}>
-                    {analysis.signal}
+                  <span className="text-3xl">{signalConfig[displayAnalysis.signal].icon}</span>
+                  <span className={`text-3xl font-black ${signalConfig[displayAnalysis.signal].text}`}>
+                    {displayAnalysis.signal}
                   </span>
                 </div>
-                <p className="text-zinc-400 text-sm max-w-xl">{analysis.signalReason}</p>
+                <p className="text-zinc-400 text-sm max-w-xl">{displayAnalysis.signalReason}</p>
               </div>
 
-              {analysis.signal !== 'NEUTRAL' && (
+              {displayAnalysis.signal !== 'NEUTRAL' && (
                 <div className="flex gap-3">
                   <div className="rounded-lg bg-zinc-800/80 border border-zinc-700/50 px-4 py-3 text-center">
                     <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Call Option</div>
-                    <div className={`font-bold text-lg ${analysis.signal === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
-                      {analysis.signal === 'BUY' ? 'BUY' : 'SELL'}
+                    <div className={`font-bold text-lg ${displayAnalysis.signal === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
+                      {displayAnalysis.signal === 'BUY' ? 'BUY' : 'SELL'}
                     </div>
                   </div>
                   <div className="rounded-lg bg-zinc-800/80 border border-zinc-700/50 px-4 py-3 text-center">
                     <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Put Option</div>
-                    <div className={`font-bold text-lg ${analysis.signal === 'BUY' ? 'text-red-400' : 'text-green-400'}`}>
-                      {analysis.signal === 'BUY' ? 'SELL' : 'BUY'}
+                    <div className={`font-bold text-lg ${displayAnalysis.signal === 'BUY' ? 'text-red-400' : 'text-green-400'}`}>
+                      {displayAnalysis.signal === 'BUY' ? 'SELL' : 'BUY'}
                     </div>
                   </div>
                 </div>
@@ -169,34 +180,34 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
             {/* Current Price */}
             <div className="rounded-xl bg-zinc-900/50 border border-zinc-800/50 p-4">
               <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Price</div>
-              <div className="text-xl font-bold text-zinc-100">{currentPrice.toLocaleString('en-IN')}</div>
+              <div className="text-xl font-bold text-zinc-100">{displayCurrentPrice.toLocaleString('en-IN')}</div>
             </div>
 
             {/* Trend */}
             <div className="rounded-xl bg-zinc-900/50 border border-zinc-800/50 p-4">
               <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">SuperTrend</div>
-              <div className={`text-xl font-bold ${analysis.currentTrend === 'up' ? 'text-green-400' : analysis.currentTrend === 'down' ? 'text-red-400' : 'text-zinc-400'}`}>
-                {analysis.currentTrend === 'up' ? '↑ UP' : analysis.currentTrend === 'down' ? '↓ DOWN' : '—'}
+              <div className={`text-xl font-bold ${displayAnalysis.currentTrend === 'up' ? 'text-green-400' : displayAnalysis.currentTrend === 'down' ? 'text-red-400' : 'text-zinc-400'}`}>
+                {displayAnalysis.currentTrend === 'up' ? '↑ UP' : displayAnalysis.currentTrend === 'down' ? '↓ DOWN' : '—'}
               </div>
-              <div className="text-xs text-zinc-500 mt-1">Level: {analysis.superTrendValue.toLocaleString('en-IN')}</div>
+              <div className="text-xs text-zinc-500 mt-1">Level: {displayAnalysis.superTrendValue.toLocaleString('en-IN')}</div>
             </div>
 
             {/* RSI */}
             <div className="rounded-xl bg-zinc-900/50 border border-zinc-800/50 p-4">
               <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">RSI (7)</div>
-              <div className={`text-xl font-bold ${getRSIColor(analysis.currentRSI)}`}>
-                {analysis.currentRSI}
+              <div className={`text-xl font-bold ${getRSIColor(displayAnalysis.currentRSI)}`}>
+                {displayAnalysis.currentRSI}
               </div>
-              <div className="text-xs text-zinc-500 mt-1">{getRSILabel(analysis.currentRSI)}</div>
+              <div className="text-xs text-zinc-500 mt-1">{getRSILabel(displayAnalysis.currentRSI)}</div>
               {/* RSI bar */}
               <div className="w-full h-1.5 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${
-                    analysis.currentRSI >= 70 ? 'bg-red-500' :
-                    analysis.currentRSI <= 30 ? 'bg-green-500' :
+                    displayAnalysis.currentRSI >= 70 ? 'bg-red-500' :
+                    displayAnalysis.currentRSI <= 30 ? 'bg-green-500' :
                     'bg-blue-500'
                   }`}
-                  style={{ width: getRSIBarWidth(analysis.currentRSI) }}
+                  style={{ width: getRSIBarWidth(displayAnalysis.currentRSI) }}
                 ></div>
               </div>
             </div>
@@ -204,24 +215,24 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
             {/* ATR */}
             <div className="rounded-xl bg-zinc-900/50 border border-zinc-800/50 p-4">
               <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">ATR</div>
-              <div className="text-xl font-bold text-zinc-100">{analysis.currentATR}</div>
+              <div className="text-xl font-bold text-zinc-100">{displayAnalysis.currentATR}</div>
               <div className="text-xs text-zinc-500 mt-1">Volatility</div>
             </div>
 
             {/* Candle Count */}
             <div className="rounded-xl bg-zinc-900/50 border border-zinc-800/50 p-4">
               <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Candles</div>
-              <div className="text-xl font-bold text-zinc-100">{candleCount}</div>
+              <div className="text-xl font-bold text-zinc-100">{displayCandleCount}</div>
               <div className="text-xs text-zinc-500 mt-1">3-min intervals</div>
             </div>
           </div>
 
           {/* Recent Candles Table */}
-          {recentData.length > 0 && (
+          {displayRecentData.length > 0 && (
             <div className="rounded-xl border border-zinc-800/50 overflow-hidden">
               <div className="px-4 py-3 bg-zinc-900/50 border-b border-zinc-800/50">
                 <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
-                  Recent Candles with Indicators (Last {recentData.length})
+                  Recent Candles with Indicators (Last {displayRecentData.length})
                 </h3>
               </div>
               <div className="overflow-x-auto">
@@ -240,11 +251,11 @@ export default function TechnicalAnalysis({ symbol }: TechnicalAnalysisProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {recentData.map((candle, idx) => (
+                    {displayRecentData.map((candle, idx) => (
                       <tr
                         key={idx}
                         className={`border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors ${
-                          idx === recentData.length - 1 ? 'bg-zinc-800/20' : ''
+                          idx === displayRecentData.length - 1 ? 'bg-zinc-800/20' : ''
                         }`}
                       >
                         <td className="px-3 py-2 text-zinc-300 font-mono">{candle.time}</td>

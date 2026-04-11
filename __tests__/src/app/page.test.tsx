@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import Home from '@/app/page';
 
 let optionChainRequestCount = 0;
+let termStructureRequestCount = 0;
 
 // PURPOSE: Validate the dashboard page’s real fetch choreography and refresh-driven widgets together.
 describe('app/page', () => {
@@ -13,6 +14,7 @@ describe('app/page', () => {
     jest.useFakeTimers();
     // Resetting the response counter keeps the first and second poll payloads predictable.
     optionChainRequestCount = 0;
+    termStructureRequestCount = 0;
     // Replacing fetch keeps the page fully offline and deterministic in tests.
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
       // Converting the request to a string makes URL routing easy inside the mock.
@@ -105,6 +107,67 @@ describe('app/page', () => {
         } as Response;
       }
 
+      if (url === '/api/term-structure?symbol=NIFTY') {
+        termStructureRequestCount += 1;
+
+        return {
+          json: async () => ({
+            symbol: 'NIFTY',
+            currentExpiryDate: '24-Apr-2026',
+            nextExpiryDate: '01-May-2026',
+            snapshot: null,
+            result: {
+              symbol: 'NIFTY',
+              asOf: '2026-04-06T10:00:00.000Z',
+              underlyingValue: 22123.45,
+              daysToExpiry: 1,
+              features: {
+                atmTermSpread: 4.2,
+                putSkewTransfer: -2.3,
+                oiRollRatio: 1.7,
+                wallShift: 200,
+                pinVsBreakout: 320,
+              },
+              featureSignals: [
+                {
+                  feature: 'atmTermSpread',
+                  rawValue: 4.2,
+                  direction: 'NEUTRAL',
+                  strength: 'MODERATE',
+                  reason: 'Front-week IV is elevated but not yet directional.',
+                },
+                {
+                  feature: 'putSkewTransfer',
+                  rawValue: -2.3,
+                  direction: 'BULLISH',
+                  strength: 'STRONG',
+                  reason: 'Hedging is not rolling into next week.',
+                },
+              ],
+              confluence: {
+                bullishCount: 3,
+                bearishCount: 0,
+                neutralCount: 1,
+                pinCount: 1,
+                dominantDirection: 'BULLISH',
+                confluenceScore: 54,
+              },
+              recommendation: {
+                action: 'BUY_NEXT_WEEK_ATM',
+                direction: 'BULLISH',
+                strength: 'MODERATE',
+                rationale: ['OI is rolling forward.', 'Next-week wall is above this week.'],
+                riskNote: 'Exit if the roll ratio reverses.',
+                suggestedExpiry: 'NEXT_WEEK',
+                suggestedStrike: 22200,
+                confluenceScore: 54,
+              },
+            },
+            error: null,
+          }),
+        } as Response;
+      }
+
       // The technical-analysis widgets also request their shared backend route after symbol selection.
       if (url === '/api/technical-analysis?symbol=NIFTY&interval=3') {
         return {
@@ -171,6 +234,9 @@ describe('app/page', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith('/api/option-chain?symbol=NIFTY&expiryDate=24-Apr-2026');
     });
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('/api/term-structure?symbol=NIFTY');
+    });
 
     // The live table should surface the latest option-chain timestamp once data loads.
     expect(await screen.findByText('06-Apr-2026 15:29:59')).toBeInTheDocument();
@@ -178,6 +244,8 @@ describe('app/page', () => {
     expect(screen.getByText('22,123.45')).toBeInTheDocument();
     // The option-chain row should include the returned strike price.
     expect(screen.getAllByText('22000').length).toBeGreaterThan(0);
+    // The term-structure overlay should surface its recommendation once both expiries are compared.
+    expect(await screen.findAllByText('BUY_NEXT_WEEK_ATM')).not.toHaveLength(0);
 
     // Advancing the fake clock should trigger the 15-second polling interval.
     await act(async () => {
@@ -192,6 +260,13 @@ describe('app/page', () => {
 
       expect(optionChainCalls).toHaveLength(2);
     });
+    await waitFor(() => {
+      const termStructureCalls = (global.fetch as jest.Mock).mock.calls.filter(
+        ([url]) => url === '/api/term-structure?symbol=NIFTY'
+      );
+
+      expect(termStructureCalls).toHaveLength(2);
+    });
 
     // The second poll should update the timestamp to the newer payload.
     expect(await screen.findByText('06-Apr-2026 15:30:14')).toBeInTheDocument();
@@ -199,5 +274,7 @@ describe('app/page', () => {
     expect(screen.getByText('OI & Volume Deltas (vs. last 15s)')).toBeInTheDocument();
     // The diff table should reflect the 100-contract call OI increase from the second payload.
     expect(screen.getAllByText('+0.1k').length).toBeGreaterThan(0);
+    // The secondary overlay should keep polling with the live option-chain loop.
+    expect(termStructureRequestCount).toBe(2);
   });
 });

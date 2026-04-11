@@ -9,6 +9,7 @@ import {
   calculateUVR,
   calculateVegaExposure,
 } from '@/lib/signals';
+import type { TermStructureSignalResult } from '@/lib/termStructure.types';
 import type {
   AnalyticsContext,
   AnalyticsSnapshot,
@@ -37,6 +38,7 @@ export interface BuildAnalyticsInput {
   strikes: LiveOptionStrikeInput[];
   context?: AnalyticsContext;
   technical?: TechnicalAnalysisSnapshot | null;
+  termStructure?: TermStructureSignalResult | null;
 }
 
 export type DerivedSignalMetrics = SignalMetrics;
@@ -411,6 +413,7 @@ export function buildAnalyticsSnapshot(input: BuildAnalyticsInput): AnalyticsSna
     confluence,
     generatedAt: input.timestamp ?? new Date().toISOString(),
     technical,
+    termStructure: input.termStructure ?? null,
   };
 }
 
